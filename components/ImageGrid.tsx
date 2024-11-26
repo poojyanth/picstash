@@ -3,93 +3,135 @@ import {
   FlatList,
   Image,
   TouchableOpacity,
+  Text,
   StyleSheet,
   Dimensions,
   PermissionsAndroid,
   Alert,
-    Platform,
+  View,
+  Platform,
 } from 'react-native';
 import RNFS from 'react-native-fs';
-
-interface ImageGridProps {
-  onImagePress: (imageUri: string) => void;
-}
 
 const { width } = Dimensions.get('window');
 const IMAGE_SIZE = width / 3 - 10;
 
+interface Item {
+  name: string;
+  path: string;
+  type: 'folder' | 'image';
+}
+
+interface ImageGridProps {
+    onImagePress: (imageUri: string) => void;
+  }
+
 const ImageGrid: React.FC<ImageGridProps> = ({ onImagePress }) => {
-  const [images, setImages] = useState<string[]>([]);
+  const [items, setItems] = useState<Item[]>([]);
+  const [currentDir, setCurrentDir] = useState<string | null>(null); // Track current directory
 
   const requestStoragePermission = async (): Promise<boolean> => {
-    if (Platform.OS !== 'android') return true; // No permissions needed for iOS
-  
+    if (Platform.OS !== 'android') return true;
+
     try {
-      if (Platform.Version >= 33) {
-        // Android 13+
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES,
-          {
-            title: 'Permission to Access Media',
-            message: 'This app needs access to your media to display images.',
-            buttonPositive: 'OK',
-          }
-        );
-        return granted === PermissionsAndroid.RESULTS.GRANTED;
-      } else {
-        // Android < 13
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE,
-          {
-            title: 'Permission to Access Storage',
-            message: 'This app needs access to your storage to display images.',
-            buttonPositive: 'OK',
-          }
-        );
-        return granted === PermissionsAndroid.RESULTS.GRANTED;
-      }
+      const granted = await PermissionsAndroid.request(
+        Platform.Version >= 33
+          ? PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES
+          : PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE,
+        {
+          title: 'Permission to Access Media',
+          message: 'This app needs access to your media to display images.',
+          buttonPositive: 'OK',
+        }
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
     } catch (err) {
       console.warn(err);
       return false;
     }
   };
 
-  const fetchImages = async () => {
-    let hasPermission = await requestStoragePermission();
+  const fetchItems = async (dirPath: string | null = null) => {
+    const hasPermission = await requestStoragePermission();
     if (!hasPermission) {
       Alert.alert('Permission Denied', 'Cannot access storage without permission.');
       return;
     }
-
-    const picturesDir = `${RNFS.ExternalStorageDirectoryPath}/Pictures`; // Directory path
+  
+    const directory = dirPath ?? `${RNFS.ExternalStorageDirectoryPath}/DCIM`; // Default to DCIM folder
+  
     try {
-      const files = await RNFS.readDir(picturesDir); // Read the directory
-      const imageFiles = files
-        .filter(file => file.isFile() && /\.(jpg|jpeg|png)$/i.test(file.name)) // Filter image files
-        .map(file => `file://${file.path}`); // Convert to URI
-
-      setImages(imageFiles);
+      const files = await RNFS.readDir(directory); // Read directory
+      const folderItems: Item[] = [];
+  
+      for (const file of files) {
+        if (file.isDirectory()) {
+          // Add folder
+          folderItems.push({ name: file.name, path: file.path, type: 'folder', mtime: file.mtime });
+        } else if (file.isFile() && /\.(jpg|jpeg|png)$/i.test(file.name)) {
+          // Add image
+          folderItems.push({ name: file.name, path: `file://${file.path}`, type: 'image', mtime: file.mtime });
+        }
+      }
+  
+      // Sort items by modified time, latest first
+      const sortedItems = folderItems.sort((a, b) => {
+        if (!a.mtime || !b.mtime) return 0; // Handle missing mtime
+        return b.mtime.getTime() - a.mtime.getTime();
+      });
+  
+      setItems(sortedItems);
+      setCurrentDir(dirPath); // Update current directory
     } catch (err) {
-      console.error('Error reading images:', err);
+      console.error('Error reading directory:', err);
+      Alert.alert('Error', 'Failed to access the directory.');
+    }
+  };
+  
+
+  const handleFolderPress = (folderPath: string) => {
+    fetchItems(folderPath); // Fetch items inside the folder
+  };
+
+  const handleBackPress = () => {
+    if (currentDir) {
+      const parentDir = currentDir.substring(0, currentDir.lastIndexOf('/'));
+      fetchItems(parentDir); // Navigate to parent directory
     }
   };
 
   useEffect(() => {
-    fetchImages();
+    fetchItems(); // Initial fetch
   }, []);
 
   return (
-    <FlatList
-      data={images}
-      keyExtractor={(item, index) => index.toString()}
-      numColumns={3}
-      renderItem={({ item }) => (
-        <TouchableOpacity onPress={() => onImagePress(item)}>
-          <Image source={{ uri: item }} style={styles.image} />
+    <View style={{ flex: 1 }}>
+      {currentDir && (
+        <TouchableOpacity onPress={handleBackPress} style={styles.backButton}>
+          <Text style={styles.backText}>Back</Text>
         </TouchableOpacity>
       )}
-      contentContainerStyle={styles.grid}
-    />
+      <FlatList
+        data={items}
+        keyExtractor={(item, index) => index.toString()}
+        numColumns={3}
+        renderItem={({ item }) =>
+          item.type === 'image' ? (
+            <TouchableOpacity onPress={() => onImagePress(item.path)}>
+                <Image source={{ uri: item.path }} style={styles.image} />
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={styles.folder}
+              onPress={() => handleFolderPress(item.path)}
+            >
+              <Text style={styles.folderText}>{item.name}</Text>
+            </TouchableOpacity>
+          )
+        }
+        contentContainerStyle={styles.grid}
+      />
+    </View>
   );
 };
 
@@ -102,6 +144,27 @@ const styles = StyleSheet.create({
     height: IMAGE_SIZE,
     margin: 5,
     borderRadius: 10,
+  },
+  folder: {
+    width: IMAGE_SIZE,
+    height: IMAGE_SIZE,
+    margin: 5,
+    backgroundColor: '#f0f0f0',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 10,
+  },
+  folderText: {
+    textAlign: 'center',
+    color: '#333',
+  },
+  backButton: {
+    padding: 10,
+    backgroundColor: '#007AFF',
+  },
+  backText: {
+    color: '#fff',
+    textAlign: 'center',
   },
 });
 
